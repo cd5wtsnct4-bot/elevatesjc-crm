@@ -51,7 +51,10 @@
 
   async function api(path, opts) {
     opts = opts || {};
-    const headers = Object.assign({ 'Content-Type': 'application/json' }, opts.headers || {});
+    // FormData sets its own multipart Content-Type (with boundary) — letting
+    // the default 'application/json' through here would break file uploads.
+    const isFormData = typeof FormData !== 'undefined' && opts.body instanceof FormData;
+    const headers = isFormData ? Object.assign({}, opts.headers || {}) : Object.assign({ 'Content-Type': 'application/json' }, opts.headers || {});
     if (opts.method && opts.method !== 'GET') headers['X-CSRF-Token'] = window.CRM.csrfToken;
     const res = await fetch(window.CRM.apiBase + path, Object.assign({ credentials: 'same-origin' }, opts, { headers }));
     if (res.status === 401) { window.location.href = 'login.php'; throw new Error('Not authenticated'); }
@@ -498,20 +501,36 @@
 
   // ================= Settings =================
   async function renderSettings() {
-    const s = await get('settings.php');
+    const [s, calData] = await Promise.all([get('settings.php'), get('calendar_connections.php')]);
     const isAdmin = window.CRM.currentUser.role === 'admin';
     const dis = isAdmin ? '' : 'disabled';
+    const connections = calData.connections;
     contentEl.innerHTML = `
+      <div class="card">
+        <h3>Logo</h3>
+        <p style="font-size:.78rem;color:var(--text-muted);margin-bottom:10px">Shown in the sidebar, the login screen, and on printed proposals/invoices. JPEG, PNG or WebP, up to 3MB.</p>
+        <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+          <div id="logoPreviewBox" style="width:64px;height:64px;border-radius:10px;background:#fff;border:1px solid var(--border);display:flex;align-items:center;justify-content:center;overflow:hidden;flex-shrink:0">
+            ${s.company_logo ? `<img src="${esc(s.company_logo)}?t=${Date.now()}" alt="Logo" style="max-width:100%;max-height:100%;object-fit:contain"/>` : `<span style="font-weight:800;color:var(--brand-primary);font-size:1.3rem">${esc((s.company_name || 'E')[0].toUpperCase())}</span>`}
+          </div>
+          ${isAdmin ? `
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <label class="btn btn-outline btn-sm" style="cursor:pointer">Upload logo<input type="file" id="logoFileInput" accept="image/png,image/jpeg,image/webp" style="display:none"/></label>
+            ${s.company_logo ? '<button type="button" class="btn btn-outline btn-sm" id="removeLogoBtn">Remove logo</button>' : ''}
+          </div>` : ''}
+        </div>
+      </div>
       <form id="settingsForm">
         <div class="two-col">
           <div class="card">
-            <h3>Branding</h3>
+            <h3>Branding Colours</h3>
             <div class="field"><label>Company Name</label><input name="company_name" value="${esc(s.company_name)}" ${dis}/></div>
             <div class="field"><label>Tagline</label><input name="tagline" value="${esc(s.tagline)}" ${dis}/></div>
             <div class="field-row">
               <div class="field"><label>Primary Color</label><input type="color" name="primary_color" value="${s.primary_color || '#142850'}" ${dis}/></div>
               <div class="field"><label>Accent Color</label><input type="color" name="accent_color" value="${s.accent_color || '#16C79A'}" ${dis}/></div>
             </div>
+            <div class="field"><label>Secondary Accent Color</label><input type="color" name="accent_color_2" value="${s.accent_color_2 || '#F4A300'}" ${dis}/></div>
           </div>
           <div class="card">
             <h3>Company Details (used on proposal/invoice letterheads)</h3>
@@ -534,9 +553,40 @@
               <div class="field"><label>Branch Code</label><input name="bank_branch_code" value="${esc(s.bank_branch_code)}" ${dis}/></div>
             </div>
           </div>
+          <div class="card">
+            <h3>Quote / Proposal / Invoice Template</h3>
+            <div class="field">
+              <label>Layout Style</label>
+              <select name="template_style" ${dis}>
+                <option value="classic" ${(s.template_style || 'classic') === 'classic' ? 'selected' : ''}>Classic — bordered letterhead</option>
+                <option value="modern" ${s.template_style === 'modern' ? 'selected' : ''}>Modern — bold colour band</option>
+                <option value="minimal" ${s.template_style === 'minimal' ? 'selected' : ''}>Minimal — understated rule line</option>
+              </select>
+            </div>
+            <div class="field"><label>Proposal Footer Note</label><textarea name="proposal_footer_note" ${dis} placeholder="e.g. Thank you for the opportunity to work with you.">${esc(s.proposal_footer_note)}</textarea></div>
+            <div class="field"><label>Invoice Footer Note</label><textarea name="invoice_footer_note" ${dis} placeholder="e.g. Payment due within 30 days. Thank you for your business.">${esc(s.invoice_footer_note)}</textarea></div>
+          </div>
         </div>
         ${isAdmin ? '<div class="modal-actions" style="justify-content:flex-start;margin-top:6px"><button type="submit" class="btn btn-primary">Save Settings</button></div>' : '<p style="font-size:.72rem;color:var(--text-muted);margin-top:10px">Only administrators can change these settings.</p>'}
-      </form>`;
+      </form>
+      <div class="card" style="margin-top:16px">
+        <h3>Connected Calendars</h3>
+        <p style="font-size:.78rem;color:var(--text-muted);margin-bottom:10px">Link a Microsoft 365 calendar to sync it two-way with the CRM Calendar. Everyone's connected calendars show up together there.</p>
+        ${!calData.sync_enabled ? '<p style="font-size:.78rem;color:var(--text-muted)">Microsoft calendar sync is not configured on this server yet.</p>' : `
+        <table><thead><tr><th>Owner</th><th>Account</th><th>Colour</th><th>Last synced</th><th></th></tr></thead>
+        <tbody>${connections.length ? connections.map((c) => `
+          <tr>
+            <td>${esc(c.owner_name)}${c.is_mine ? ' (you)' : ''}</td>
+            <td>${esc(c.display_name || c.ms_email || '—')}${c.last_sync_error ? `<div style="font-size:.68rem;color:var(--danger)">⚠ ${esc(c.last_sync_error)}</div>` : ''}</td>
+            <td>${c.is_mine ? `<input type="color" class="calColorInput" data-id="${c.id}" value="${esc(c.color)}"/>` : `<span class="cal-dot" style="background:${esc(c.color)}"></span>`}</td>
+            <td style="font-size:.75rem;color:var(--text-muted)">${c.last_synced_at ? new Date(c.last_synced_at + 'Z').toLocaleString('en-ZA') : 'Never'}</td>
+            <td>${c.is_mine ? `<button class="btn btn-outline btn-sm calDisconnectBtn" data-id="${c.id}">Disconnect</button>` : ''}</td>
+          </tr>`).join('') : '<tr><td colspan="5" style="color:var(--text-muted)">No calendars connected yet.</td></tr>'}
+        </tbody></table>
+        <div class="modal-actions" style="justify-content:flex-start;margin-top:12px">
+          <a class="btn btn-primary" href="auth/ms_calendar_connect.php">+ Connect Microsoft Calendar</a>
+        </div>`}
+      </div>`;
     if (isAdmin) {
       document.getElementById('settingsForm').addEventListener('submit', async (e) => {
         e.preventDefault();
@@ -545,14 +595,47 @@
           await put('settings.php', body);
           document.documentElement.style.setProperty('--brand-primary', body.primary_color);
           document.documentElement.style.setProperty('--brand-accent', body.accent_color);
+          document.documentElement.style.setProperty('--brand-gold', body.accent_color_2);
           toast('Settings saved. Refresh to see branding text changes everywhere.');
         } catch (err) { alert(err.message); }
       });
+      const logoInput = document.getElementById('logoFileInput');
+      if (logoInput) logoInput.addEventListener('change', async () => {
+        const file = logoInput.files[0];
+        if (!file) return;
+        const form = new FormData();
+        form.append('logo', file);
+        try {
+          await api('settings_logo.php', { method: 'POST', body: form });
+          toast('Logo updated.'); renderSettings();
+        } catch (err) { alert(err.message); }
+      });
+      const removeLogoBtn = document.getElementById('removeLogoBtn');
+      if (removeLogoBtn) removeLogoBtn.addEventListener('click', async () => {
+        if (!confirm('Remove the current logo?')) return;
+        try { await del('settings_logo.php'); toast('Logo removed.'); renderSettings(); }
+        catch (err) { alert(err.message); }
+      });
     }
+    contentEl.querySelectorAll('.calColorInput').forEach((input) => input.addEventListener('change', async () => {
+      try { await api('calendar_connections.php?id=' + input.dataset.id, { method: 'PATCH', body: JSON.stringify({ color: input.value }) }); toast('Colour updated.'); }
+      catch (err) { alert(err.message); }
+    }));
+    contentEl.querySelectorAll('.calDisconnectBtn').forEach((btn) => btn.addEventListener('click', async () => {
+      if (!confirm('Disconnect this calendar? Events already synced will stay in the CRM but stop updating.')) return;
+      try { await del('calendar_connections.php?id=' + btn.dataset.id); toast('Calendar disconnected.'); renderSettings(); }
+      catch (err) { alert(err.message); }
+    }));
   }
 
   // ================= Calendar =================
   let calendarViewDate = null;
+  const hiddenCalendars = new Set(); // 'local' and/or connection ids (as strings) currently hidden
+  let calendarSyncing = false;
+
+  function calendarLabel(conn) {
+    return conn.display_name || conn.ms_email || conn.owner_name;
+  }
 
   async function renderCalendar() {
     if (!calendarViewDate) calendarViewDate = new Date();
@@ -563,13 +646,30 @@
     const gridStart = new Date(firstOfMonth); gridStart.setDate(gridStart.getDate() - gridStart.getDay());
     const gridEnd = new Date(lastOfMonth); gridEnd.setDate(gridEnd.getDate() + (6 - gridEnd.getDay()));
 
-    const [events, contacts, deals] = await Promise.all([
+    const [allEvents, contacts, deals, calData] = await Promise.all([
       get('calendar.php?start=' + ymd(gridStart) + '&end=' + ymd(gridEnd)),
-      get('contacts.php'), get('deals.php'),
+      get('contacts.php'), get('deals.php'), get('calendar_connections.php'),
     ]);
+    const connections = calData.connections;
+    const myConnections = connections.filter((c) => c.is_mine);
 
+    // Opportunistically refresh from Microsoft once per view-load, for whichever
+    // of the current user's own connected calendars need it — cheap no-op if
+    // there's nothing to sync, and keeps "must show all calendars" reasonably live
+    // without requiring everyone to click Sync manually.
+    let events = allEvents;
+    if (calData.sync_enabled && myConnections.length && !calendarSyncing) {
+      calendarSyncing = true;
+      try {
+        await post('calendar_connections.php?action=sync', {});
+        events = await get('calendar.php?start=' + ymd(gridStart) + '&end=' + ymd(gridEnd));
+      } catch (e) { /* best-effort — stale data is still shown */ }
+      calendarSyncing = false;
+    }
+
+    const visibleEvents = events.filter((e) => !hiddenCalendars.has(e.connection_id ? String(e.connection_id) : 'local'));
     const eventsByDay = {};
-    events.forEach((e) => { const day = e.start_datetime.slice(0, 10); (eventsByDay[day] = eventsByDay[day] || []).push(e); });
+    visibleEvents.forEach((e) => { const day = e.start_datetime.slice(0, 10); (eventsByDay[day] = eventsByDay[day] || []).push(e); });
 
     const monthLabel = firstOfMonth.toLocaleDateString('en-ZA', { month: 'long', year: 'numeric' });
     const todayStr = ymd(new Date());
@@ -581,10 +681,15 @@
       const dayEvents = eventsByDay[dayStr] || [];
       cells += `<div class="cal-cell${inMonth ? '' : ' outside'}${dayStr === todayStr ? ' today' : ''}" data-date="${dayStr}">
         <div class="cal-daynum">${d.getDate()}</div>
-        ${dayEvents.slice(0, 3).map((e) => `<div class="cal-event" data-id="${e.id}">${esc(e.title)}</div>`).join('')}
+        ${dayEvents.slice(0, 3).map((e) => `<div class="cal-event" data-id="${e.id}"${e.calendar_color ? ` style="border-left:4px solid ${esc(e.calendar_color)}"` : ''}>${esc(e.title)}</div>`).join('')}
         ${dayEvents.length > 3 ? `<div class="cal-more">+${dayEvents.length - 3} more</div>` : ''}
       </div>`;
     }
+
+    const legendChips = [
+      `<label class="cal-legend-chip"><input type="checkbox" data-cal="local" ${hiddenCalendars.has('local') ? '' : 'checked'}/><span class="cal-dot" style="background:var(--brand-accent)"></span>Local only</label>`,
+      ...connections.map((c) => `<label class="cal-legend-chip"><input type="checkbox" data-cal="${c.id}" ${hiddenCalendars.has(String(c.id)) ? '' : 'checked'}/><span class="cal-dot" style="background:${esc(c.color)}"></span>${esc(calendarLabel(c))}${c.last_sync_error ? ' ⚠' : ''}</label>`),
+    ].join('');
 
     contentEl.innerHTML = `
       <div class="toolbar">
@@ -594,8 +699,12 @@
           <button class="btn btn-outline btn-sm" id="calNext">›</button>
           <button class="btn btn-outline btn-sm" id="calToday">Today</button>
         </div>
-        <button class="btn btn-primary" id="addEventBtn">+ Add Event</button>
+        <div style="display:flex;gap:8px">
+          ${calData.sync_enabled && myConnections.length ? '<button class="btn btn-outline btn-sm" id="calSyncBtn">⟳ Sync now</button>' : ''}
+          <button class="btn btn-primary" id="addEventBtn">+ Add Event</button>
+        </div>
       </div>
+      <div class="cal-legend">${legendChips}</div>
       <div class="card">
         <div class="cal-weekdays">${WEEKDAY_LABELS.map((d) => `<div>${d}</div>`).join('')}</div>
         <div class="cal-grid">${cells}</div>
@@ -604,19 +713,36 @@
     document.getElementById('calPrev').addEventListener('click', () => { calendarViewDate = new Date(year, month - 1, 1); renderCalendar(); });
     document.getElementById('calNext').addEventListener('click', () => { calendarViewDate = new Date(year, month + 1, 1); renderCalendar(); });
     document.getElementById('calToday').addEventListener('click', () => { calendarViewDate = new Date(); renderCalendar(); });
-    document.getElementById('addEventBtn').addEventListener('click', () => openEventModal(null, contacts, deals, todayStr));
+    document.getElementById('addEventBtn').addEventListener('click', () => openEventModal(null, contacts, deals, myConnections, todayStr));
+    const syncBtn = document.getElementById('calSyncBtn');
+    if (syncBtn) syncBtn.addEventListener('click', async () => {
+      toast('Syncing with Microsoft…');
+      try {
+        const r = await post('calendar_connections.php?action=sync', {});
+        toast(r.errors.length ? `Synced with issues: ${r.errors[0]}` : `Synced (${r.pulled} pulled, ${r.pushed} pushed).`);
+      } catch (err) { toast('Sync failed: ' + err.message); }
+      renderCalendar();
+    });
 
+    contentEl.querySelectorAll('[data-cal]').forEach((box) => box.addEventListener('change', () => {
+      const key = box.dataset.cal;
+      if (box.checked) hiddenCalendars.delete(key); else hiddenCalendars.add(key);
+      renderCalendar();
+    }));
     contentEl.querySelectorAll('.cal-event').forEach((el) => el.addEventListener('click', (e) => {
       e.stopPropagation();
-      openEventModal(events.find((x) => x.id == el.dataset.id), contacts, deals);
+      openEventModal(events.find((x) => x.id == el.dataset.id), contacts, deals, myConnections);
     }));
-    contentEl.querySelectorAll('.cal-cell').forEach((cell) => cell.addEventListener('click', () => openEventModal(null, contacts, deals, cell.dataset.date)));
+    contentEl.querySelectorAll('.cal-cell').forEach((cell) => cell.addEventListener('click', () => openEventModal(null, contacts, deals, myConnections, cell.dataset.date)));
   }
 
-  function openEventModal(ev, contacts, deals, defaultDate) {
+  function openEventModal(ev, contacts, deals, myConnections, defaultDate) {
     ev = ev || {};
     const startVal = ev.start_datetime ? ev.start_datetime.replace(' ', 'T').slice(0, 16) : (defaultDate ? defaultDate + 'T09:00' : '');
     const endVal = ev.end_datetime ? ev.end_datetime.replace(' ', 'T').slice(0, 16) : '';
+    const calendarField = ev.id
+      ? (ev.connection_id ? `<div class="field"><label>Calendar</label><div style="padding:8px 0;font-size:.8rem"><span class="cal-dot" style="background:${esc(ev.calendar_color)}"></span> Synced with ${esc(ev.calendar_label || ev.calendar_email)} — can't be moved to another calendar.</div></div>` : '')
+      : (myConnections.length ? `<div class="field"><label>Calendar</label><select name="connection_id"><option value="">Local only (this CRM)</option>${myConnections.map((c) => `<option value="${c.id}">${esc(calendarLabel(c))}</option>`).join('')}</select></div>` : '');
     openModal(`
       <h2>${ev.id ? 'Edit Event' : 'Add Event'}</h2>
       <form id="eventForm">
@@ -630,6 +756,7 @@
           <div class="field"><label>Contact</label><select name="contact_id">${optionList(contacts, 'id', 'name', ev.contact_id)}</select></div>
           <div class="field"><label>Deal</label><select name="deal_id">${optionList(deals, 'id', 'title', ev.deal_id)}</select></div>
         </div>
+        ${calendarField}
         <div class="field"><label>Description</label><textarea name="description">${esc(ev.description)}</textarea></div>
         <div class="modal-actions">
           ${ev.id ? '<button type="button" class="btn btn-danger" id="deleteEventBtn" style="margin-right:auto">Delete</button>' : ''}
@@ -647,8 +774,8 @@
       body.start_datetime = body.start_datetime.replace('T', ' ');
       if (body.end_datetime) body.end_datetime = body.end_datetime.replace('T', ' ');
       try {
-        if (ev.id) await put('calendar.php?id=' + ev.id, body); else await post('calendar.php', body);
-        closeModal(); toast('Event saved.'); renderCalendar();
+        const r = ev.id ? await put('calendar.php?id=' + ev.id, body) : await post('calendar.php', body);
+        closeModal(); toast(r.warning || 'Event saved.'); renderCalendar();
       } catch (err) { alert(err.message); }
     });
   }
@@ -936,6 +1063,15 @@
       } catch (err) { alert(err.message); }
     });
   }
+
+  (function handleMsCalendarRedirect() {
+    const params = new URLSearchParams(location.search);
+    if (params.has('ms_cal_connected')) toast('Microsoft calendar connected.');
+    if (params.has('ms_cal_error')) toast('Microsoft calendar: ' + params.get('ms_cal_error'));
+    if (params.has('ms_cal_connected') || params.has('ms_cal_error')) {
+      history.replaceState(null, '', location.pathname + location.hash);
+    }
+  })();
 
   route();
 })();
