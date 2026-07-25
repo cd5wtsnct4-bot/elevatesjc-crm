@@ -13,7 +13,7 @@ define('DB_HOST', getenv('CRM_DB_HOST') ?: '127.0.0.1');
 define('DB_PORT', getenv('CRM_DB_PORT') ?: '3306');
 define('DB_NAME', getenv('CRM_DB_NAME') ?: 'elevatesjc_crm');
 define('DB_USER', getenv('CRM_DB_USER') ?: 'elevatesjc_crm');
-define('DB_PASS', getenv('CRM_DB_PASS') ?: 'CHANGE_ME');
+define('DB_PASS', getenv('CRM_DB_PASS') ?: 'Janine@1978!');
 
 // ---------------------------------------------------------------
 // Microsoft Entra ID (Azure AD) — "Sign in with Microsoft"
